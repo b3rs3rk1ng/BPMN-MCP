@@ -179,6 +179,61 @@ function createHeadlessCanvas(): any {
       }
     }
 
+    // Polyfill HTMLCanvasElement.getContext — canvas npm pkg doesn't support Node v25
+    const HTMLCanvasElement = (jsdomInstance.window as any).HTMLCanvasElement;
+    if (HTMLCanvasElement) {
+      HTMLCanvasElement.prototype.getContext = function(type: string) {
+        if (type !== '2d') return null;
+        const ctx: any = {
+          font: '12px sans-serif',
+          fillStyle: '#000',
+          strokeStyle: '#000',
+          lineWidth: 1,
+          globalAlpha: 1,
+          textAlign: 'left',
+          textBaseline: 'alphabetic',
+          measureText: (text: string) => {
+            // Parse font size from ctx.font (e.g. "11px Arial") for better accuracy
+            const size = parseFloat(ctx.font) || 12;
+            const avgCharWidth = size * 0.52; // ~0.52 ratio for Arial/sans-serif
+            return { width: text.length * avgCharWidth, actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2 };
+          },
+          fillText: () => {},
+          strokeText: () => {},
+          clearRect: () => {},
+          fillRect: () => {},
+          strokeRect: () => {},
+          beginPath: () => {},
+          closePath: () => {},
+          moveTo: () => {},
+          lineTo: () => {},
+          arc: () => {},
+          arcTo: () => {},
+          bezierCurveTo: () => {},
+          quadraticCurveTo: () => {},
+          rect: () => {},
+          stroke: () => {},
+          fill: () => {},
+          clip: () => {},
+          save: () => {},
+          restore: () => {},
+          translate: () => {},
+          scale: () => {},
+          rotate: () => {},
+          transform: () => {},
+          setTransform: () => {},
+          drawImage: () => {},
+          createLinearGradient: () => ({ addColorStop: () => {} }),
+          createRadialGradient: () => ({ addColorStop: () => {} }),
+          createPattern: () => ({}),
+          setLineDash: () => {},
+          getLineDash: () => [],
+          canvas: this,
+        };
+        return ctx;
+      };
+    }
+
     // Execute the bundle in the jsdom context
     jsdomInstance.window.eval(bpmnJsBundle);
 
@@ -574,12 +629,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
         }
 
         const { svg } = await diagram.modeler.saveSVG();
+        const elementRegistry = diagram.modeler.get("elementRegistry");
+
+        // JSDOM bug: SVG setAttribute('transform') is ignored during serialization.
+        // Post-process: inject transform="translate(x,y)" for each shape using elementRegistry positions.
+        let fixedSvg = svg || "";
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+        elementRegistry.forEach((el: any) => {
+          if (el.x === undefined || el.y === undefined) return;
+
+          // Inject transform on the shape's djs-element group
+          fixedSvg = fixedSvg.replace(
+            `data-element-id="${el.id}" style="display: block;"`,
+            `data-element-id="${el.id}" style="display: block;" transform="translate(${el.x},${el.y})"`
+          );
+
+          // Track bounds for viewBox (shapes only, not connections)
+          if (!el.waypoints) {
+            minX = Math.min(minX, el.x);
+            minY = Math.min(minY, el.y);
+            maxX = Math.max(maxX, el.x + (el.width || 0));
+            maxY = Math.max(maxY, el.y + (el.height || 0));
+          }
+        });
+
+        // Fix viewBox to encompass all elements
+        if (minX !== Infinity) {
+          const pad = 30;
+          const vbX = minX - pad, vbY = minY - pad;
+          const vbW = maxX - minX + pad * 2, vbH = maxY - minY + pad * 2;
+          fixedSvg = fixedSvg.replace(
+            /width="\d+" height="\d+" viewBox="[^"]*"/,
+            `width="${vbW}" height="${vbH}" viewBox="${vbX} ${vbY} ${vbW} ${vbH}"`
+          );
+        }
 
         return {
           content: [
             {
               type: "text",
-              text: svg || "",
+              text: fixedSvg,
             },
           ],
         };
