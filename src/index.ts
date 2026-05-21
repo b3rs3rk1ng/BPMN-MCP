@@ -11,6 +11,8 @@ const {
 const { JSDOM } = require("jsdom");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const { execSync } = require("child_process");
 
 let BpmnModeler: any;
 let jsdomInstance: any;
@@ -438,6 +440,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["xml"],
         },
       },
+      {
+        name: "open_in_browser",
+        description: "Save a BPMN diagram as an HTML file and open it in the default browser",
+        inputSchema: {
+          type: "object",
+          properties: {
+            diagramId: {
+              type: "string",
+              description: "The diagram ID",
+            },
+            outputPath: {
+              type: "string",
+              description: "Optional file path to save the HTML (default: temp directory)",
+            },
+          },
+          required: ["diagramId"],
+        },
+      },
     ],
   };
 });
@@ -744,6 +764,64 @@ server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
               }, null, 2),
             },
           ],
+        };
+      }
+
+      case "open_in_browser": {
+        const { diagramId, outputPath } = args as any;
+        const diagram = diagrams.get(diagramId);
+
+        if (!diagram) {
+          throw new McpError(ErrorCode.InvalidRequest, `Diagram not found: ${diagramId}`);
+        }
+
+        const { xml } = await diagram.modeler.saveXML({ format: true });
+        const xmlEscaped = JSON.stringify(xml || "");
+
+        const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>BPMN Diagram</title>
+  <link rel="stylesheet" href="https://unpkg.com/bpmn-js@17/dist/assets/bpmn-js.css">
+  <link rel="stylesheet" href="https://unpkg.com/bpmn-js@17/dist/assets/diagram-js.css">
+  <link rel="stylesheet" href="https://unpkg.com/bpmn-js@17/dist/assets/bpmn-font/css/bpmn.css">
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #fff; }
+    #canvas { width: 100%; height: 100%; }
+    .djs-palette { display: none; }
+  </style>
+</head>
+<body>
+  <div id="canvas"></div>
+  <script src="https://unpkg.com/bpmn-js@17/dist/bpmn-modeler.development.js"></script>
+  <script>
+    var bpmnXml = ${xmlEscaped};
+    var modeler = new BpmnJS({ container: '#canvas' });
+    modeler.importXML(bpmnXml).then(function() {
+      modeler.get('canvas').zoom('fit-viewport');
+    }).catch(function(err) {
+      document.body.innerHTML = '<pre style="color:red;padding:20px">Error: ' + err.message + '</pre>';
+    });
+  </script>
+</body>
+</html>`;
+
+        const filePath = outputPath || path.join(os.tmpdir(), `bpmn-preview-${diagramId}.html`);
+        fs.writeFileSync(filePath, html, "utf-8");
+
+        const openCmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+        execSync(`${openCmd} "${filePath}"`);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              filePath,
+              message: `Diagram opened in browser: ${filePath}`,
+            }, null, 2),
+          }],
         };
       }
 
